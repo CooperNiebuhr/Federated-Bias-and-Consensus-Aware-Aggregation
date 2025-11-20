@@ -29,9 +29,10 @@ if __name__ == '__main__':
     args = args_parser()
     exp_details(args)
 
-    if args.gpu_id:
-        torch.cuda.set_device(args.gpu_id)
-    device = 'cuda' if args.gpu else 'cpu'
+    # if args.gpu_id:
+    #     torch.cuda.set_device(args.gpu_id)
+    # device = 'cuda' if args.gpu else 'cpu'
+    device = 'cpu'
 
     # load dataset and user groups
     train_dataset, test_dataset, user_groups = get_dataset(args)
