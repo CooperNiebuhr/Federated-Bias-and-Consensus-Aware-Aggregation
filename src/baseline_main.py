@@ -13,6 +13,7 @@ from utils import get_dataset
 from options import args_parser
 from update import test_inference
 from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar
+import os
 
 
 if __name__ == '__main__':
@@ -89,9 +90,16 @@ if __name__ == '__main__':
     plt.plot(range(len(epoch_loss)), epoch_loss)
     plt.xlabel('epochs')
     plt.ylabel('Train loss')
-    plt.savefig('../save/nn_{}_{}_{}.png'.format(args.dataset, args.model,
-                                                 args.epochs))
 
+    save_path = '../save'
+    os.makedirs(save_path, exist_ok=True)
+
+    outfile = os.path.join(save_path,
+                       'nn_{}_{}_{}.png'.format(args.dataset,
+                                                args.model,
+                                                args.epochs))
+    plt.savefig(outfile)
+    
     # testing
     test_acc, test_loss = test_inference(args, global_model, test_dataset)
     print('Test on', len(test_dataset), 'samples')

@@ -17,6 +17,13 @@ from options import args_parser
 from update import LocalUpdate, test_inference
 from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar
 from utils import get_dataset, average_weights, exp_details
+from save_utils import (
+    prepare_output_dir,
+    save_config,
+    save_model,
+    save_metrics,
+    save_final_results,
+)
 
 
 if __name__ == '__main__':
@@ -28,6 +35,10 @@ if __name__ == '__main__':
 
     args = args_parser()
     exp_details(args)
+
+    # Prepare standardized output directory for this run
+    out_dir = prepare_output_dir(dataset=args.dataset, method="fedavg")
+    save_config(out_dir, vars(args))
 
     # if args.gpu_id:
     #     torch.cuda.set_device(args.gpu_id)
@@ -68,6 +79,7 @@ if __name__ == '__main__':
 
     # Training
     train_loss, train_accuracy = [], []
+    rounds = []
     val_acc_list, net_list = [], []
     cv_loss, cv_acc = [], []
     print_every = 2
@@ -108,6 +120,7 @@ if __name__ == '__main__':
             list_acc.append(acc)
             list_loss.append(loss)
         train_accuracy.append(sum(list_acc)/len(list_acc))
+        rounds.append(epoch + 1)
 
         # print global training loss after every 'i' rounds
         if (epoch+1) % print_every == 0:
@@ -122,15 +135,22 @@ if __name__ == '__main__':
     print("|---- Avg Train Accuracy: {:.2f}%".format(100*train_accuracy[-1]))
     print("|---- Test Accuracy: {:.2f}%".format(100*test_acc))
 
-    # Saving the objects train_loss and train_accuracy:
-    file_name = '../save/objects/{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}].pkl'.\
-        format(args.dataset, args.model, args.epochs, args.frac, args.iid,
-               args.local_ep, args.local_bs)
+    # --- Save artifacts for this run (research-paper style) ---
+    # 1) Save the final global model
+    save_model(out_dir, global_model)
 
-    with open(file_name, 'wb') as f:
-        pickle.dump([train_loss, train_accuracy], f)
+    # 2) Save per-round metrics (loss + train accuracy)
+    save_metrics(out_dir, rounds, train_loss, train_accuracy)
 
-    print('\n Total Run Time: {0:0.4f}'.format(time.time()-start_time))
+    # 3) Save final summary numbers (easy to reference in the paper)
+    save_final_results(
+        out_dir,
+        final_train_acc=train_accuracy[-1],
+        final_test_acc=test_acc,
+        final_test_loss=test_loss,
+    )
+
+    print('\n Total Run Time: {0:0.4f}'.format(time.time() - start_time))
 
     # PLOTTING (optional)
     # import matplotlib
