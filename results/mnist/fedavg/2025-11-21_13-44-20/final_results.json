@@ -1,0 +1,5 @@
+{
+    "final_train_acc": 0.99,
+    "final_test_acc": 0.9864,
+    "final_test_loss": 3.551261753011204
+}

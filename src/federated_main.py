@@ -23,7 +23,18 @@ from save_utils import (
     save_model,
     save_metrics,
     save_final_results,
+    save_loss_plot
 )
+
+
+def flatten_state_dict(state_dict, keys=None):
+    """
+    Flatten a state_dict (or dict of tensors) into a single 1D tensor.
+    The `keys` argument fixes the order, so all flattenings are consistent.
+    """
+    if keys is None:
+        keys = sorted(state_dict.keys())
+    return torch.cat([state_dict[k].reshape(-1) for k in keys])
 
 
 if __name__ == '__main__':
@@ -37,7 +48,7 @@ if __name__ == '__main__':
     exp_details(args)
 
     # Prepare standardized output directory for this run
-    out_dir = prepare_output_dir(dataset=args.dataset, method="fedavg")
+    out_dir = prepare_output_dir(dataset=args.dataset, method="fedbac_A1_consensus_only")
     save_config(out_dir, vars(args))
 
     # if args.gpu_id:
@@ -84,28 +95,113 @@ if __name__ == '__main__':
     cv_loss, cv_acc = [], []
     print_every = 2
     val_loss_pre, counter = 0, 0
+    
+    # Initialize server-side momentum vector
+    vbar = {
+        name: torch.zeros_like(param, device=device)
+        for name, param in global_weights.items()
+    }
+    param_keys = list(global_weights.keys())
+
 
     for epoch in tqdm(range(args.epochs)):
         local_weights, local_losses = [], []
+        client_update_vecs = []  # flattened v_i for this round
+        consensus_scores = []    # C_i for this round
         print(f'\n | Global Training Round : {epoch+1} |\n')
 
         global_model.train()
+
+        # w_t: global weights *before* this round's client updates
+        prev_global_weights = copy.deepcopy(global_model.state_dict())
+
+        # v̄_{t-1} flattened (for cosine with v_i)
+        vbar_flat_prev = flatten_state_dict(vbar, keys=param_keys)
+        vbar_norm = torch.norm(vbar_flat_prev)
+        eps = 1e-12
+
+        # hyperparameters for FedBaC consensus
+        gamma = getattr(args, "gamma", 1.0)      # sharpness γ
+        beta = getattr(args, "beta", 0.9)        # momentum β
+
         m = max(int(args.frac * args.num_users), 1)
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
 
         for idx in idxs_users:
-            local_model = LocalUpdate(args=args, dataset=train_dataset,
-                                      idxs=user_groups[idx], logger=logger)
+            local_model = LocalUpdate(
+                args=args,
+                dataset=train_dataset,
+                idxs=user_groups[idx],
+                logger=logger
+            )
             w, loss = local_model.update_weights(
-                model=copy.deepcopy(global_model), global_round=epoch)
+                model=copy.deepcopy(global_model),
+                global_round=epoch
+            )
+
             local_weights.append(copy.deepcopy(w))
             local_losses.append(copy.deepcopy(loss))
 
-        # update global weights
-        global_weights = average_weights(local_weights)
+            # --- FedBaC: client update v_i = w_i - w_t, then flatten ---
+            v_i = {
+                name: w[name] - prev_global_weights[name]
+                for name in param_keys
+            }
+            v_i_flat = flatten_state_dict(v_i, keys=param_keys)
+            client_update_vecs.append(v_i_flat)
 
-        # update global weights
+            # --- Consensus score C_i = max(0, cos(v_i, v̄_{t-1}))^γ ---
+            if vbar_norm > eps:
+                vi_norm = torch.norm(v_i_flat)
+                if vi_norm > eps:
+                    cos_i = torch.dot(v_i_flat, vbar_flat_prev) / (
+                        vi_norm * vbar_norm + eps
+                    )
+                    # Clamp numeric noise and apply ReLU + sharpness
+                    cos_i = torch.clamp(cos_i, -1.0, 1.0)
+                    c_i = torch.clamp(cos_i, min=0.0) ** gamma
+                else:
+                    # Zero update: treat as neutral contributor
+                    c_i = torch.tensor(1.0)
+            else:
+                # First round or nearly-zero momentum: fall back to FedAvg (C_i = 1)
+                c_i = torch.tensor(1.0)
+
+            consensus_scores.append(c_i)
+
+        # Convert C_i to a tensor
+        C = torch.stack(consensus_scores)  # shape [m]
+
+        # Normalize to get α_i ∝ C_i (consensus-only: R_i ≡ 1)
+        if torch.sum(C) <= 0:
+            # Extreme corner case: fall back to uniform FedAvg
+            alpha = torch.ones_like(C) / C.numel()
+            print("Warning: all consensus scores were zero!")
+        else:
+            alpha = C / torch.sum(C)
+
+        # --- Consensus-weighted aggregation ---
+        # w_{t+1} = Σ_i α_i w_i   (equivalent to w_t + Σ_i α_i v_i if Σ α_i = 1)
+        global_weights = copy.deepcopy(prev_global_weights)
+        for k in global_weights.keys():
+            agg_param = torch.zeros_like(prev_global_weights[k])
+            for a_i, w_i in zip(alpha, local_weights):
+                agg_param += a_i * w_i[k]
+            global_weights[k] = agg_param
+
         global_model.load_state_dict(global_weights)
+
+        # --- FedBaC Momentum Update v̄_t = β v̄_{t-1} + (1 − β) Δw_t ---
+        delta_w_t = {
+            name: global_weights[name] - prev_global_weights[name]
+            for name in global_weights.keys()
+        }
+        for name in vbar.keys():
+            vbar[name] = beta * vbar[name] + (1.0 - beta) * delta_w_t[name]
+
+        # (Optional) keep flattened v̄_t for logging later if you like:
+        # vbar_flat = flatten_state_dict(vbar, keys=param_keys)
+
 
         loss_avg = sum(local_losses) / len(local_losses)
         train_loss.append(loss_avg)
@@ -115,7 +211,7 @@ if __name__ == '__main__':
         global_model.eval()
         for c in range(args.num_users):
             local_model = LocalUpdate(args=args, dataset=train_dataset,
-                                      idxs=user_groups[idx], logger=logger)
+                                      idxs=user_groups[c], logger=logger) # changed from idx to c, hopefully a bug fix
             acc, loss = local_model.inference(model=global_model)
             list_acc.append(acc)
             list_loss.append(loss)
@@ -142,10 +238,17 @@ if __name__ == '__main__':
     # 2) Save per-round metrics (loss + train accuracy)
     save_metrics(out_dir, rounds, train_loss, train_accuracy)
 
+    save_loss_plot(out_dir, rounds, train_loss, train_accuracy)
+
     # 3) Save final summary numbers (easy to reference in the paper)
     save_final_results(
         out_dir,
+        method="fedbac_A1_consensus_only",
+        num_rounds=len(rounds),
         final_train_acc=train_accuracy[-1],
+        final_train_loss=train_loss[-1],
+        max_train_acc=max(train_accuracy),
+        min_train_loss=min(train_loss),
         final_test_acc=test_acc,
         final_test_loss=test_loss,
     )

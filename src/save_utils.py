@@ -3,6 +3,7 @@ import json
 import torch
 import datetime
 import csv
+import matplotlib.pyplot as plt
 
 
 def prepare_output_dir(dataset: str, method: str) -> str:
@@ -65,3 +66,32 @@ def save_final_results(out_dir: str,
     path = os.path.join(out_dir, "final_results.json")
     with open(path, "w") as f:
         json.dump(data, f, indent=4)
+
+
+def save_loss_plot(out_dir, rounds, train_loss, train_accuracy=None):
+    """
+    Save a PNG plot of training loss (and optionally accuracy) vs. rounds
+    into the run's output directory.
+    """
+    # Loss curve
+    plt.figure()
+    plt.plot(rounds, train_loss)
+    plt.xlabel("Communication Rounds")
+    plt.ylabel("Training Loss")
+    plt.title("Training Loss vs Communication Rounds")
+    plt.tight_layout()
+    loss_path = os.path.join(out_dir, "train_loss.png")
+    plt.savefig(loss_path)
+    plt.close()
+
+    # Optional accuracy curve
+    if train_accuracy is not None:
+        plt.figure()
+        plt.plot(rounds, train_accuracy)
+        plt.xlabel("Communication Rounds")
+        plt.ylabel("Train Accuracy")
+        plt.title("Train Accuracy vs Communication Rounds")
+        plt.tight_layout()
+        acc_path = os.path.join(out_dir, "train_accuracy.png")
+        plt.savefig(acc_path)
+        plt.close()
