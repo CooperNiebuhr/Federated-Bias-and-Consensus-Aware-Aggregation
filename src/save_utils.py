@@ -95,3 +95,20 @@ def save_loss_plot(out_dir, rounds, train_loss, train_accuracy=None):
         acc_path = os.path.join(out_dir, "train_accuracy.png")
         plt.savefig(acc_path)
         plt.close()
+
+def save_reliability_metrics(out_dir: str,
+                             rounds,
+                             mean_R,
+                             spearman_R_acc):
+    """
+    Save per-round reliability statistics in a CSV file.
+
+    Columns:
+        round, mean_R, spearman_R_acc
+    """
+    path = os.path.join(out_dir, "reliability_metrics.csv")
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["round", "mean_R", "spearman_R_acc"])
+        for r, mr, corr in zip(rounds, mean_R, spearman_R_acc):
+            writer.writerow([r, mr, corr])

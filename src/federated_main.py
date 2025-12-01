@@ -9,6 +9,8 @@ import time
 import pickle
 import numpy as np
 from tqdm import tqdm
+import math
+from collections import defaultdict, deque
 
 import torch
 from tensorboardX import SummaryWriter
@@ -23,8 +25,12 @@ from save_utils import (
     save_model,
     save_metrics,
     save_final_results,
-    save_loss_plot
+    save_loss_plot,
+    save_reliability_metrics,
 )
+
+
+
 
 
 def flatten_state_dict(state_dict, keys=None):
@@ -35,6 +41,38 @@ def flatten_state_dict(state_dict, keys=None):
     if keys is None:
         keys = sorted(state_dict.keys())
     return torch.cat([state_dict[k].reshape(-1) for k in keys])
+
+class ReliabilityTracker:
+    """
+    Tracks a small history of consensus cosines per client and converts
+    their variance into a reliability score R_i = exp(-alpha * Var).
+    """
+    def __init__(self, num_clients: int, window: int = 5, alpha: float = 1.0):
+        self.window = window
+        self.alpha = alpha
+        self.history = {
+            i: deque(maxlen=window) for i in range(num_clients)
+        }
+
+    def update(self, client_id: int, cos_val):
+        """
+        Push a new cosine value for client_id. cos_val can be None
+        (in which case we ignore it).
+        """
+        if cos_val is None:
+            return
+        self.history[client_id].append(float(cos_val))
+
+    def get_reliability(self, client_id: int) -> float:
+        """
+        Return R_i for this client based on the variance of recent cosines.
+        If we have <= 1 sample, return a neutral reliability of 1.0.
+        """
+        hist = self.history[client_id]
+        if len(hist) <= 1:
+            return 1.0
+        var = float(np.var(hist))
+        return float(np.exp(-self.alpha * var))
 
 
 if __name__ == '__main__':
@@ -48,7 +86,7 @@ if __name__ == '__main__':
     exp_details(args)
 
     # Prepare standardized output directory for this run
-    out_dir = prepare_output_dir(dataset=args.dataset, method="fedbac_A1_consensus_only")
+    out_dir = prepare_output_dir(dataset=args.dataset, method="fedbac_consensus_reliability")
     save_config(out_dir, vars(args))
 
     # if args.gpu_id:
@@ -103,11 +141,30 @@ if __name__ == '__main__':
     }
     param_keys = list(global_weights.keys())
 
+        # Reliability tracker hyperparams (fallback defaults)
+    H = getattr(args, "reliab_window", 5)
+    alpha_R = getattr(args, "reliab_alpha", 1.0)
+
+    reliability = ReliabilityTracker(
+        num_clients=args.num_users,
+        window=H,
+        alpha=alpha_R,
+    )
+
+    # Per-round reliability logs
+    round_mean_R = []
+    round_spearman_R_acc = []
+
+
 
     for epoch in tqdm(range(args.epochs)):
         local_weights, local_losses = [], []
         client_update_vecs = []  # flattened v_i for this round
         consensus_scores = []    # C_i for this round
+
+        # for logging
+        reliability_scores = []  # R_i for this round
+        selected_client_ids = [] # client indices in this round
         print(f'\n | Global Training Round : {epoch+1} |\n')
 
         global_model.train()
@@ -126,6 +183,7 @@ if __name__ == '__main__':
 
         m = max(int(args.frac * args.num_users), 1)
         idxs_users = np.random.choice(range(args.num_users), m, replace=False)
+        reliability_scores = []  # R_i for this round
 
         for idx in idxs_users:
             local_model = LocalUpdate(
@@ -151,6 +209,8 @@ if __name__ == '__main__':
             client_update_vecs.append(v_i_flat)
 
             # --- Consensus score C_i = max(0, cos(v_i, v̄_{t-1}))^γ ---
+            cos_for_reliab = None  # default: no cosine this round
+
             if vbar_norm > eps:
                 vi_norm = torch.norm(v_i_flat)
                 if vi_norm > eps:
@@ -160,25 +220,42 @@ if __name__ == '__main__':
                     # Clamp numeric noise and apply ReLU + sharpness
                     cos_i = torch.clamp(cos_i, -1.0, 1.0)
                     c_i = torch.clamp(cos_i, min=0.0) ** gamma
+
+                    # Keep raw cosine (before ReLU/gamma) for reliability
+                    cos_for_reliab = float(cos_i.detach().cpu().item())
                 else:
                     # Zero update: treat as neutral contributor
-                    c_i = torch.tensor(1.0)
+                    c_i = torch.tensor(1.0, device=device)
+                # end if vi_norm
             else:
                 # First round or nearly-zero momentum: fall back to FedAvg (C_i = 1)
-                c_i = torch.tensor(1.0)
+                c_i = torch.tensor(1.0, device=device)
 
             consensus_scores.append(c_i)
+            selected_client_ids.append(idx)
 
-        # Convert C_i to a tensor
-        C = torch.stack(consensus_scores)  # shape [m]
+            # --- Reliability R_i from cosine-history variance ---
+            reliability.update(idx, cos_for_reliab)
+            R_i_val = reliability.get_reliability(idx)
+            reliability_scores.append(torch.tensor(R_i_val, device=device, dtype=torch.float32))
 
-        # Normalize to get α_i ∝ C_i (consensus-only: R_i ≡ 1)
-        if torch.sum(C) <= 0:
+        # Convert C_i and R_i to tensors
+        C = torch.stack(consensus_scores)        # shape [m]
+        R = torch.stack(reliability_scores)      # shape [m]
+
+        # Combine into α_i ∝ C_i * R_i
+        CR = C * R
+        if torch.sum(CR) <= 0:
             # Extreme corner case: fall back to uniform FedAvg
-            alpha = torch.ones_like(C) / C.numel()
-            print("Warning: all consensus scores were zero!")
+            alpha = torch.ones_like(CR) / CR.numel()
+            print("Warning: all consensus*reliability scores were zero!")
         else:
-            alpha = C / torch.sum(C)
+            alpha = CR / torch.sum(CR)
+
+        # Log per-round mean R over the sampled clients
+        round_mean_R.append(float(R.mean().item()))
+
+
 
         # --- Consensus-weighted aggregation ---
         # w_{t+1} = Σ_i α_i w_i   (equivalent to w_t + Σ_i α_i v_i if Σ α_i = 1)
@@ -210,26 +287,57 @@ if __name__ == '__main__':
         list_acc, list_loss = [], []
         global_model.eval()
         for c in range(args.num_users):
-            local_model = LocalUpdate(args=args, dataset=train_dataset,
-                                      idxs=user_groups[c], logger=logger) # changed from idx to c, hopefully a bug fix
+            local_model = LocalUpdate(
+                args=args,
+                dataset=train_dataset,
+                idxs=user_groups[c],
+                logger=logger
+            )
             acc, loss = local_model.inference(model=global_model)
             list_acc.append(acc)
             list_loss.append(loss)
-        train_accuracy.append(sum(list_acc)/len(list_acc))
+
+        mean_acc = sum(list_acc) / len(list_acc)
+        train_accuracy.append(mean_acc)
         rounds.append(epoch + 1)
 
+        # --- Reliability–accuracy coupling: Spearman(R_i, acc_i) ---
+        R_all = np.array(
+            [reliability.get_reliability(c) for c in range(args.num_users)],
+            dtype=np.float32,
+        )
+        acc_all = np.array(list_acc, dtype=np.float32)
+
+        # Spearman via ranking + Pearson on ranks
+        if np.all(acc_all == acc_all[0]) or np.all(R_all == R_all[0]):
+            # Degenerate case: all equal → zero correlation
+            corr_R_acc = 0.0
+        else:
+            # rank
+            R_rank = np.argsort(np.argsort(R_all)).astype(np.float32)
+            acc_rank = np.argsort(np.argsort(acc_all)).astype(np.float32)
+            R_rank -= R_rank.mean()
+            acc_rank -= acc_rank.mean()
+            denom = (np.sqrt((R_rank ** 2).sum()) * np.sqrt((acc_rank ** 2).sum()) + 1e-12)
+            corr_R_acc = float((R_rank * acc_rank).sum() / denom)
+
+        round_spearman_R_acc.append(corr_R_acc)
+
         # print global training loss after every 'i' rounds
-        if (epoch+1) % print_every == 0:
+        if (epoch + 1) % print_every == 0:
             print(f' \nAvg Training Stats after {epoch+1} global rounds:')
             print(f'Training Loss : {np.mean(np.array(train_loss))}')
-            print('Train Accuracy: {:.2f}% \n'.format(100*train_accuracy[-1]))
+            print('Train Accuracy: {:.2f}%'.format(100 * train_accuracy[-1]))
+            print(f'Mean reliability R: {round_mean_R[-1]:.4f}')
+            print(f'Spearman(R, client acc): {round_spearman_R_acc[-1]:.4f}\n')
 
-    # Test inference after completion of training
+
+       # Test inference after completion of training
     test_acc, test_loss = test_inference(args, global_model, test_dataset)
 
     print(f' \n Results after {args.epochs} global rounds of training:')
-    print("|---- Avg Train Accuracy: {:.2f}%".format(100*train_accuracy[-1]))
-    print("|---- Test Accuracy: {:.2f}%".format(100*test_acc))
+    print("|---- Avg Train Accuracy: {:.2f}%".format(100 * train_accuracy[-1]))
+    print("|---- Test Accuracy: {:.2f}%".format(100 * test_acc))
 
     # --- Save artifacts for this run (research-paper style) ---
     # 1) Save the final global model
@@ -237,45 +345,43 @@ if __name__ == '__main__':
 
     # 2) Save per-round metrics (loss + train accuracy)
     save_metrics(out_dir, rounds, train_loss, train_accuracy)
-
     save_loss_plot(out_dir, rounds, train_loss, train_accuracy)
 
-    # 3) Save final summary numbers (easy to reference in the paper)
+    # 3) Save per-round reliability metrics
+    save_reliability_metrics(out_dir, rounds, round_mean_R, round_spearman_R_acc)
+
+    # 4) Save final summary numbers (easy to reference in the paper)
     save_final_results(
-        out_dir,
-        method="fedbac_A1_consensus_only",
-        num_rounds=len(rounds),
-        final_train_acc=train_accuracy[-1],
-        final_train_loss=train_loss[-1],
-        max_train_acc=max(train_accuracy),
-        min_train_loss=min(train_loss),
-        final_test_acc=test_acc,
-        final_test_loss=test_loss,
+    out_dir,
+    final_train_acc=train_accuracy[-1],
+    final_test_acc=test_acc,
+    final_test_loss=test_loss,
     )
+
 
     print('\n Total Run Time: {0:0.4f}'.format(time.time() - start_time))
 
-    # PLOTTING (optional)
-    # import matplotlib
-    # import matplotlib.pyplot as plt
-    # matplotlib.use('Agg')
+    #PLOTTING (optional)
+    import matplotlib
+    import matplotlib.pyplot as plt
+    matplotlib.use('Agg')
 
-    # Plot Loss curve
-    # plt.figure()
-    # plt.title('Training Loss vs Communication rounds')
-    # plt.plot(range(len(train_loss)), train_loss, color='r')
-    # plt.ylabel('Training loss')
-    # plt.xlabel('Communication Rounds')
-    # plt.savefig('../save/fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_loss.png'.
-    #             format(args.dataset, args.model, args.epochs, args.frac,
-    #                    args.iid, args.local_ep, args.local_bs))
-    #
-    # # Plot Average Accuracy vs Communication rounds
-    # plt.figure()
-    # plt.title('Average Accuracy vs Communication rounds')
-    # plt.plot(range(len(train_accuracy)), train_accuracy, color='k')
-    # plt.ylabel('Average Accuracy')
-    # plt.xlabel('Communication Rounds')
-    # plt.savefig('../save/fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_acc.png'.
-    #             format(args.dataset, args.model, args.epochs, args.frac,
-    #                    args.iid, args.local_ep, args.local_bs))
+    #Plot Loss curve
+    plt.figure()
+    plt.title('Training Loss vs Communication rounds')
+    plt.plot(range(len(train_loss)), train_loss, color='r')
+    plt.ylabel('Training loss')
+    plt.xlabel('Communication Rounds')
+    plt.savefig('../save/fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_loss.png'.
+                format(args.dataset, args.model, args.epochs, args.frac,
+                       args.iid, args.local_ep, args.local_bs))
+    
+    # Plot Average Accuracy vs Communication rounds
+    plt.figure()
+    plt.title('Average Accuracy vs Communication rounds')
+    plt.plot(range(len(train_accuracy)), train_accuracy, color='k')
+    plt.ylabel('Average Accuracy')
+    plt.xlabel('Communication Rounds')
+    plt.savefig('../save/fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_acc.png'.
+                format(args.dataset, args.model, args.epochs, args.frac,
+                       args.iid, args.local_ep, args.local_bs))
