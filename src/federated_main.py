@@ -18,7 +18,7 @@ from tensorboardX import SummaryWriter
 from options import args_parser
 from update import LocalUpdate, test_inference
 from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar
-from utils import get_dataset, average_weights, exp_details
+from utils import get_dataset, average_weights, exp_details, flatten_tensor_dict
 from save_utils import (
     prepare_output_dir,
     save_config,
@@ -32,15 +32,6 @@ from save_utils import (
 
 
 
-
-def flatten_state_dict(state_dict, keys=None):
-    """
-    Flatten a state_dict (or dict of tensors) into a single 1D tensor.
-    The `keys` argument fixes the order, so all flattenings are consistent.
-    """
-    if keys is None:
-        keys = sorted(state_dict.keys())
-    return torch.cat([state_dict[k].reshape(-1) for k in keys])
 
 class ReliabilityTracker:
     """
@@ -86,13 +77,19 @@ if __name__ == '__main__':
     exp_details(args)
 
     # Prepare standardized output directory for this run
-    out_dir = prepare_output_dir(dataset=args.dataset, method="fedbac_consensus_reliability")
+    out_dir = prepare_output_dir(dataset=args.dataset, method="fedbac_full_reliability")
     save_config(out_dir, vars(args))
 
-    # if args.gpu_id:
-    #     torch.cuda.set_device(args.gpu_id)
-    # device = 'cuda' if args.gpu else 'cpu'
-    device = 'cpu'
+    # Device setup
+    if getattr(args, "gpu", False) and torch.cuda.is_available():
+        if hasattr(args, "gpu_id") and args.gpu_id is not None:
+            torch.cuda.set_device(args.gpu_id)
+        device = torch.device("cuda")
+        print(f"[INFO] Using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        device = torch.device("cpu")
+        print("[INFO] Using CPU")
+
 
     # load dataset and user groups
     train_dataset, test_dataset, user_groups = get_dataset(args)
@@ -133,6 +130,12 @@ if __name__ == '__main__':
     cv_loss, cv_acc = [], []
     print_every = 2
     val_loss_pre, counter = 0, 0
+
+    # --- Early stopping state ---
+    best_acc = 0.0
+    best_round = 0
+    best_global_weights = copy.deepcopy(global_weights)
+    early_stop_counter = 0
     
     # Initialize server-side momentum vector
     vbar = {
@@ -173,9 +176,11 @@ if __name__ == '__main__':
         prev_global_weights = copy.deepcopy(global_model.state_dict())
 
         # v̄_{t-1} flattened (for cosine with v_i)
-        vbar_flat_prev = flatten_state_dict(vbar, keys=param_keys)
+        vbar_flat_prev = flatten_tensor_dict(vbar, keys=param_keys)
         vbar_norm = torch.norm(vbar_flat_prev)
         eps = 1e-12
+        if vbar_norm > eps:
+            vbar_flat_prev = vbar_flat_prev / (vbar_norm + eps)
 
         # hyperparameters for FedBaC consensus
         gamma = getattr(args, "gamma", 1.0)      # sharpness γ
@@ -194,7 +199,9 @@ if __name__ == '__main__':
             )
             w, loss = local_model.update_weights(
                 model=copy.deepcopy(global_model),
-                global_round=epoch
+                global_round=epoch,
+                vbar_flat=vbar_flat_prev,
+                param_keys=param_keys
             )
 
             local_weights.append(copy.deepcopy(w))
@@ -205,7 +212,7 @@ if __name__ == '__main__':
                 name: w[name] - prev_global_weights[name]
                 for name in param_keys
             }
-            v_i_flat = flatten_state_dict(v_i, keys=param_keys)
+            v_i_flat = flatten_tensor_dict(v_i, keys=param_keys)
             client_update_vecs.append(v_i_flat)
 
             # --- Consensus score C_i = max(0, cos(v_i, v̄_{t-1}))^γ ---
@@ -277,7 +284,7 @@ if __name__ == '__main__':
             vbar[name] = beta * vbar[name] + (1.0 - beta) * delta_w_t[name]
 
         # (Optional) keep flattened v̄_t for logging later if you like:
-        # vbar_flat = flatten_state_dict(vbar, keys=param_keys)
+        # vbar_flat = flatten_tensor_dict(vbar, keys=param_keys)
 
 
         loss_avg = sum(local_losses) / len(local_losses)
@@ -300,6 +307,14 @@ if __name__ == '__main__':
         mean_acc = sum(list_acc) / len(list_acc)
         train_accuracy.append(mean_acc)
         rounds.append(epoch + 1)
+
+        # --- Early stopping on client-held-out accuracy ---
+        if mean_acc > best_acc:
+            best_acc = mean_acc
+            best_round = epoch + 1
+            best_global_weights = copy.deepcopy(global_weights)
+            print(f"[BEST] New best mean acc: {best_acc:.4f} at round {best_round}")
+
 
         # --- Reliability–accuracy coupling: Spearman(R_i, acc_i) ---
         R_all = np.array(
@@ -331,8 +346,11 @@ if __name__ == '__main__':
             print(f'Mean reliability R: {round_mean_R[-1]:.4f}')
             print(f'Spearman(R, client acc): {round_spearman_R_acc[-1]:.4f}\n')
 
+    # Load best model before final evaluation
+    print(f"Loading best model from round {best_round} with mean client-held-out acc {best_acc:.4f}")
+    global_model.load_state_dict(best_global_weights)
 
-       # Test inference after completion of training
+    # Test inference after completion of training
     test_acc, test_loss = test_inference(args, global_model, test_dataset)
 
     print(f' \n Results after {args.epochs} global rounds of training:')
@@ -350,10 +368,10 @@ if __name__ == '__main__':
     # 3) Save per-round reliability metrics
     save_reliability_metrics(out_dir, rounds, round_mean_R, round_spearman_R_acc)
 
-    # 4) Save final summary numbers (easy to reference in the paper)
+    # 4) Save final summary numbers 
     save_final_results(
     out_dir,
-    final_train_acc=train_accuracy[-1],
+    final_train_acc=best_acc,
     final_test_acc=test_acc,
     final_test_loss=test_loss,
     )

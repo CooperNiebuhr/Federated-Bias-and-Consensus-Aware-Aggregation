@@ -5,6 +5,7 @@
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+from utils import flatten_tensor_dict
 
 
 class DatasetSplit(Dataset):
@@ -51,7 +52,7 @@ class LocalUpdate(object):
                                 batch_size=int(len(idxs_test)/10), shuffle=False)
         return trainloader, validloader, testloader
 
-    def update_weights(self, model, global_round):
+    def update_weights(self, model, global_round, vbar_flat=None, param_keys=None):
         # Set mode to train model
         model.train()
         epoch_loss = []
@@ -64,6 +65,18 @@ class LocalUpdate(object):
             optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
                                          weight_decay=1e-4)
 
+        # Regularizer strength; default 0.0 if not set
+        lambda_reg = getattr(self.args, "lambda_reg", 0.0)
+        eps = 1e-12
+
+        # Prepare normalized server momentum direction v̂ if provided
+        v_hat = None
+        if vbar_flat is not None:
+            vbar_flat = vbar_flat.to(self.device)
+            v_norm = torch.norm(vbar_flat)
+            if v_norm > eps:
+                v_hat = vbar_flat / (v_norm + eps)
+
         for iter in range(self.args.local_ep):
             batch_loss = []
             for batch_idx, (images, labels) in enumerate(self.trainloader):
@@ -71,20 +84,60 @@ class LocalUpdate(object):
 
                 model.zero_grad()
                 log_probs = model(images)
-                loss = self.criterion(log_probs, labels)
-                loss.backward()
+                task_loss = self.criterion(log_probs, labels)
+
+                reg_loss = torch.tensor(0.0, device=self.device)
+
+                # Only apply regularizer if we have a non-zero momentum direction and λ>0
+                if (v_hat is not None) and (lambda_reg > 0.0) and (param_keys is not None):
+                    # First-order gradient of the task loss
+                    grads = torch.autograd.grad(
+                        task_loss,
+                        model.parameters(),
+                        retain_graph=True,
+                        create_graph=True,   # enable 2nd-order term
+                    )
+
+                    # Map grads to a dict keyed by parameter names
+                    grad_dict = {}
+                    for (name, _), g in zip(model.named_parameters(), grads):
+                        grad_dict[name] = g
+
+                    # Flatten in the same order as the server uses
+                    g_flat = flatten_tensor_dict(grad_dict, param_keys).to(self.device)
+                    g_norm = torch.norm(g_flat)
+
+                    if g_norm < eps:
+                        reg_loss = torch.tensor(0.0, device=self.device)
+
+                    else:
+                        g_hat = g_flat / (g_norm + eps)
+                        cos_sim = torch.clamp(torch.dot(g_hat, v_hat), -1.0, 1.0)
+                        reg_loss = lambda_reg * (1.0 - cos_sim)
+
+                total_loss = task_loss + reg_loss
+                
+                if (iter == 0) and (batch_idx == 0):
+                    print(f"[Diag] task_loss={task_loss.item():.6f}, "
+                        f"reg_loss={reg_loss.item():.6f}, "
+                        f"lambda={lambda_reg}")
+
+                total_loss.backward()
                 optimizer.step()
 
                 if self.args.verbose and (batch_idx % 10 == 0):
-                    print('| Global Round : {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                    print('| Global Round : {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f} (task: {:.6f}, reg: {:.6f})'.format(
                         global_round, iter, batch_idx * len(images),
                         len(self.trainloader.dataset),
-                        100. * batch_idx / len(self.trainloader), loss.item()))
-                self.logger.add_scalar('loss', loss.item())
-                batch_loss.append(loss.item())
-            epoch_loss.append(sum(batch_loss)/len(batch_loss))
+                        100. * batch_idx / len(self.trainloader),
+                        total_loss.item(), task_loss.item(), reg_loss.item()))
+                self.logger.add_scalar('loss', total_loss.item())
+                batch_loss.append(total_loss.item())
+
+            epoch_loss.append(sum(batch_loss) / len(batch_loss))
 
         return model.state_dict(), sum(epoch_loss) / len(epoch_loss)
+
 
     def inference(self, model):
         """ Returns the inference accuracy and loss.

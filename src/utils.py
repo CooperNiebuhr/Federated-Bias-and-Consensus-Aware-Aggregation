@@ -100,3 +100,11 @@ def exp_details(args):
     print(f'    Local Batch size   : {args.local_bs}')
     print(f'    Local Epochs       : {args.local_ep}\n')
     return
+
+def flatten_tensor_dict(tensor_dict, keys):
+    """
+    Flatten a dict of tensors (state_dict or grad_dict) into a single 1D tensor,
+    using a fixed key order.
+    """
+    return torch.cat([tensor_dict[k].reshape(-1) for k in keys])
+

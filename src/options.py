@@ -23,7 +23,8 @@ def args_parser():
                         help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.5,
                         help='SGD momentum (default: 0.5)')
-
+    parser.add_argument('--lambda_reg', type=float, default=0.0,
+                        help='regularization strength for client-side consensus regularizer')
     # model arguments
     parser.add_argument('--model', type=str, default='mlp', help='model name')
     parser.add_argument('--kernel_num', type=int, default=9,
