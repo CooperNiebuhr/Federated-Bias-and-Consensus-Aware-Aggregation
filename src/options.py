@@ -23,8 +23,18 @@ def args_parser():
                         help='learning rate')
     parser.add_argument('--momentum', type=float, default=0.5,
                         help='SGD momentum (default: 0.5)')
+    
+    # FedBaC / consensus & reliability hyperparams
     parser.add_argument('--lambda_reg', type=float, default=0.0,
                         help='regularization strength for client-side consensus regularizer')
+    parser.add_argument('--gamma', type=float, default=1.0,
+                        help='consensus sharpness exponent γ for FedBaC')
+    parser.add_argument('--beta', type=float, default=0.9,
+                        help='server momentum coefficient β for FedBaC')
+    parser.add_argument('--reliab_window', type=int, default=5,
+                        help='window size H for reliability variance estimate')
+    parser.add_argument('--reliab_alpha', type=float, default=1.0,
+                        help='scale α for reliability exp(-α Var)')
     # model arguments
     parser.add_argument('--model', type=str, default='mlp', help='model name')
     parser.add_argument('--kernel_num', type=int, default=9,
@@ -61,5 +71,8 @@ def args_parser():
                         help='rounds of early stopping')
     parser.add_argument('--verbose', type=int, default=1, help='verbose')
     parser.add_argument('--seed', type=int, default=1, help='random seed')
+    parser.add_argument('--partition_seed', type=int, default=0,
+                    help="Seed controlling the non-IID data split")
+
     args = parser.parse_args()
     return args

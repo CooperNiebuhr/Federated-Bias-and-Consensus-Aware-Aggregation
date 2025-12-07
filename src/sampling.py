@@ -23,33 +23,47 @@ def mnist_iid(dataset, num_users):
     return dict_users
 
 
-def mnist_noniid(dataset, num_users):
+def mnist_noniid(dataset, num_users, partition_seed=None):
     """
-    Sample non-I.I.D client data from MNIST dataset
-    :param dataset:
-    :param num_users:
-    :return:
+    Create a non-IID partition of MNIST using labeled shards.
+    If partition_seed is provided, the partition is fully deterministic.
     """
-    # 60,000 training imgs -->  200 imgs/shard X 300 shards
-    num_shards, num_imgs = 200, 300
-    idx_shard = [i for i in range(num_shards)]
-    dict_users = {i: np.array([]) for i in range(num_users)}
-    idxs = np.arange(num_shards*num_imgs)
+
+    import numpy as np
+
+    # Use a controlled RNG if seed given, else use global np.random
+    if partition_seed is not None:
+        rng = np.random.RandomState(partition_seed)
+    else:
+        rng = np.random
+
+    num_shards, num_imgs = 200, 300   # 60k = 300 shards * 200 imgs
+    idx_shard = list(range(num_shards))
+    dict_users = {i: np.array([], dtype=np.int64) for i in range(num_users)}
+
+    # All MNIST indices
+    idxs = np.arange(num_shards * num_imgs)
     labels = dataset.train_labels.numpy()
 
-    # sort labels
+    # sort by label
     idxs_labels = np.vstack((idxs, labels))
     idxs_labels = idxs_labels[:, idxs_labels[1, :].argsort()]
     idxs = idxs_labels[0, :]
 
-    # divide and assign 2 shards/client
+    # assign 2 shards per user
     for i in range(num_users):
-        rand_set = set(np.random.choice(idx_shard, 2, replace=False))
-        idx_shard = list(set(idx_shard) - rand_set)
-        for rand in rand_set:
-            dict_users[i] = np.concatenate(
-                (dict_users[i], idxs[rand*num_imgs:(rand+1)*num_imgs]), axis=0)
+        # deterministic if rng is seeded
+        selected = rng.choice(idx_shard, 2, replace=False)
+        for shard in selected:
+            start = shard * num_imgs
+            end = (shard + 1) * num_imgs
+            dict_users[i] = np.concatenate((dict_users[i], idxs[start:end]), axis=0)
+
+        # remove those shards from the pool
+        idx_shard = list(set(idx_shard) - set(selected))
+
     return dict_users
+
 
 
 def mnist_noniid_unequal(dataset, num_users):
@@ -170,7 +184,7 @@ def cifar_noniid(dataset, num_users):
     dict_users = {i: np.array([]) for i in range(num_users)}
     idxs = np.arange(num_shards*num_imgs)
     # labels = dataset.train_labels.numpy()
-    labels = np.array(dataset.train_labels)
+    labels = np.array(dataset.targets)
 
     # sort labels
     idxs_labels = np.vstack((idxs, labels))

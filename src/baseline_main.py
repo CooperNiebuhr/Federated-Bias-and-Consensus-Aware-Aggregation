@@ -37,7 +37,7 @@ if __name__ == '__main__':
 
     # Prepare standardized output directory for this run.
     # Use a distinct method name so it doesn't collide with your FedBaC runs.
-    out_dir = prepare_output_dir(dataset=args.dataset, method="fedavg_baseline")
+    out_dir = prepare_output_dir(dataset=args.dataset, method="fedavg_baseline_partition_fix")
     save_config(out_dir, vars(args))
 
     # For fair comparison with federated_main, stick to CPU unless you decide otherwise.

@@ -77,7 +77,7 @@ if __name__ == '__main__':
     exp_details(args)
 
     # Prepare standardized output directory for this run
-    out_dir = prepare_output_dir(dataset=args.dataset, method="fedbac_full_reliability")
+    out_dir = prepare_output_dir(dataset=args.dataset, method="fedbac_full")
     save_config(out_dir, vars(args))
 
     # Device setup
@@ -89,6 +89,7 @@ if __name__ == '__main__':
     else:
         device = torch.device("cpu")
         print("[INFO] Using CPU")
+    # device = 'cpu'
 
 
     # load dataset and user groups
@@ -379,27 +380,29 @@ if __name__ == '__main__':
 
     print('\n Total Run Time: {0:0.4f}'.format(time.time() - start_time))
 
-    #PLOTTING (optional)
+        # PLOTTING (optional)
+    import os
     import matplotlib
-    import matplotlib.pyplot as plt
     matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
 
-    #Plot Loss curve
+    # Plot Loss curve
     plt.figure()
     plt.title('Training Loss vs Communication rounds')
-    plt.plot(range(len(train_loss)), train_loss, color='r')
+    plt.plot(range(len(train_loss)), train_loss)
     plt.ylabel('Training loss')
     plt.xlabel('Communication Rounds')
-    plt.savefig('../save/fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_loss.png'.
-                format(args.dataset, args.model, args.epochs, args.frac,
-                       args.iid, args.local_ep, args.local_bs))
-    
+    loss_path = os.path.join(out_dir, "train_loss.png")
+    plt.savefig(loss_path)
+    plt.close()
+
     # Plot Average Accuracy vs Communication rounds
     plt.figure()
     plt.title('Average Accuracy vs Communication rounds')
-    plt.plot(range(len(train_accuracy)), train_accuracy, color='k')
+    plt.plot(range(len(train_accuracy)), train_accuracy)
     plt.ylabel('Average Accuracy')
     plt.xlabel('Communication Rounds')
-    plt.savefig('../save/fed_{}_{}_{}_C[{}]_iid[{}]_E[{}]_B[{}]_acc.png'.
-                format(args.dataset, args.model, args.epochs, args.frac,
-                       args.iid, args.local_ep, args.local_bs))
+    acc_path = os.path.join(out_dir, "train_accuracy.png")
+    plt.savefig(acc_path)
+    plt.close()
+
