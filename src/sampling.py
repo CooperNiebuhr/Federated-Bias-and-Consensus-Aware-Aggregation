@@ -210,3 +210,99 @@ if __name__ == '__main__':
                                    ]))
     num = 100
     d = mnist_noniid(dataset_train, num)
+
+
+def dirichlet_noniid(dataset, num_users, alpha=0.5, partition_seed=None, min_size=10):
+    """
+    Dirichlet label-skew split.
+    Deterministic if partition_seed is provided.
+
+    Returns: dict_users {client_id: np.ndarray of indices}
+    """
+    labels = _get_targets(dataset)
+    num_classes = int(labels.max() + 1)
+
+    if partition_seed is not None:
+        rng = np.random.RandomState(partition_seed)
+    else:
+        rng = np.random
+
+    # indices per class
+    idx_by_class = [np.where(labels == c)[0] for c in range(num_classes)]
+    for c in range(num_classes):
+        rng.shuffle(idx_by_class[c])
+
+    while True:
+        dict_users = {i: [] for i in range(num_users)}
+
+        for c in range(num_classes):
+            idxs = idx_by_class[c]
+            if len(idxs) == 0:
+                continue
+
+            # sample class proportions across clients
+            props = rng.dirichlet(alpha=np.full(num_users, alpha))
+
+            # convert proportions -> counts
+            counts = (props * len(idxs)).astype(int)
+
+            # fix rounding so sum(counts) == len(idxs)
+            diff = len(idxs) - counts.sum()
+            if diff > 0:
+                counts[rng.randint(0, num_users, size=diff)] += 1
+            elif diff < 0:
+                # rare case due to rounding
+                for _ in range(-diff):
+                    k = rng.randint(0, num_users)
+                    if counts[k] > 0:
+                        counts[k] -= 1
+
+            start = 0
+            for k in range(num_users):
+                end = start + counts[k]
+                if end > start:
+                    dict_users[k].extend(idxs[start:end].tolist())
+                start = end
+
+        sizes = [len(dict_users[k]) for k in range(num_users)]
+        if min(sizes) >= min_size:
+            return {k: np.array(v, dtype=np.int64) for k, v in dict_users.items()}
+        # else: resample (still deterministic for same seed because rng state advances)
+
+
+# bit of a quick and dirty wrapper to aid in dirichlet sampling implementation
+def sample_clients(dataset, num_users, iid=False, unequal=False,
+                   dirichlet=False, alpha=0.5, partition_seed=None, min_size=10):
+    """
+    Unified entry-point: returns dict_users, based on flags.
+    """
+    if iid:
+        # choose iid based on dataset
+        if hasattr(dataset, "targets"):
+            return cifar_iid(dataset, num_users)
+        return mnist_iid(dataset, num_users)
+
+    # non-iid
+    if dirichlet:
+        return dirichlet_noniid(dataset, num_users, alpha=alpha,
+                                partition_seed=partition_seed, min_size=min_size)
+
+    if unequal:
+        return mnist_noniid_unequal(dataset, num_users)
+
+    # default shard non-iid based on dataset
+    if hasattr(dataset, "targets"):
+        return cifar_noniid(dataset, num_users)
+    return mnist_noniid(dataset, num_users, partition_seed=partition_seed)
+
+def _get_targets(dataset):
+    """
+    Return labels as a 1D numpy array for MNIST/CIFAR-like datasets.
+    """
+    if hasattr(dataset, "targets"):
+        return np.array(dataset.targets)
+    if hasattr(dataset, "train_labels"):
+        return dataset.train_labels.numpy()
+    if hasattr(dataset, "train_targets"):
+        return dataset.train_targets.numpy()
+    raise AttributeError("Dataset has no recognized target field (targets/train_labels/train_targets).")

@@ -4,11 +4,13 @@
 
 import argparse
 
+# using: 
+# python .\src\federated_main.py --dataset cifar --model cnn --iid 0 --dirichlet 1 --alpha 0.5 --partition_seed 123 --sample_seed 456 --seed 999 --num_users=50 --local_ep=5 --epochs=30
 
 def args_parser():
     parser = argparse.ArgumentParser()
 
-    # federated arguments (Notation for the arguments followed from paper)
+    # federated arguments 
     parser.add_argument('--epochs', type=int, default=10,
                         help="number of rounds of training")
     parser.add_argument('--num_users', type=int, default=100,
@@ -58,8 +60,11 @@ def args_parser():
                         of dataset")
     parser.add_argument('--num_classes', type=int, default=10, help="number \
                         of classes")
-    parser.add_argument('--gpu', default=None, help="To use cuda, set \
-                        to a specific GPU ID. Default set to use CPU.")
+    # device arguments
+    parser.add_argument('--gpu', action='store_true',
+                        help="Use CUDA if available.")
+    parser.add_argument('--gpu_id', type=int, default=0,
+                        help="CUDA device id (default: 0).")
     parser.add_argument('--optimizer', type=str, default='sgd', help="type \
                         of optimizer")
     parser.add_argument('--iid', type=int, default=1,
@@ -73,6 +78,15 @@ def args_parser():
     parser.add_argument('--seed', type=int, default=1, help='random seed')
     parser.add_argument('--partition_seed', type=int, default=0,
                     help="Seed controlling the non-IID data split")
+    # partition / sampling arguments
+    parser.add_argument('--dirichlet', type=int, default=0,
+                        help='Use Dirichlet label-skew partition when non-IID (1=yes, 0=no).')
+    parser.add_argument('--alpha', type=float, default=0.5,
+                        help='Dirichlet concentration parameter (smaller => more non-IID).')
+    parser.add_argument('--min_client_size', type=int, default=10,
+                        help='Minimum samples per client for Dirichlet partition (resamples until satisfied).')
+    parser.add_argument('--sample_seed', type=int, default=0,
+                        help="Seed controlling client sampling each round (np.random.choice).")
 
     args = parser.parse_args()
     return args

@@ -19,6 +19,7 @@ from options import args_parser
 from update import LocalUpdate, test_inference
 from models import MLP, CNNMnist, CNNFashion_Mnist, CNNCifar
 from utils import get_dataset, average_weights, exp_details, flatten_tensor_dict
+from sampling import sample_clients
 from save_utils import (
     prepare_output_dir,
     save_config,
@@ -75,6 +76,10 @@ if __name__ == '__main__':
 
     args = args_parser()
     exp_details(args)
+    
+    # deterministic client sampling RNG
+    rng_sample = np.random.RandomState(getattr(args, "sample_seed", 0))
+
 
     # Prepare standardized output directory for this run
     out_dir = prepare_output_dir(dataset=args.dataset, method="fedbac_full")
@@ -93,7 +98,19 @@ if __name__ == '__main__':
 
 
     # load dataset and user groups
-    train_dataset, test_dataset, user_groups = get_dataset(args)
+    train_dataset, test_dataset, _ = get_dataset(args)
+    user_groups = sample_clients(
+        train_dataset,
+        num_users=args.num_users,
+        iid=bool(args.iid),
+        unequal=bool(args.unequal),
+        dirichlet=bool(args.dirichlet),
+        alpha=args.alpha,
+        partition_seed=args.partition_seed,
+        min_size=args.min_client_size,
+    )
+    assert len(user_groups) == args.num_users
+
 
     # BUILD MODEL
     if args.model == 'cnn':
@@ -106,7 +123,7 @@ if __name__ == '__main__':
             global_model = CNNCifar(args=args)
 
     elif args.model == 'mlp':
-        # Multi-layer preceptron
+        # Multi-layer perceptron
         img_size = train_dataset[0][0].shape
         len_in = 1
         for x in img_size:
@@ -188,7 +205,7 @@ if __name__ == '__main__':
         beta = getattr(args, "beta", 0.9)        # momentum β
 
         m = max(int(args.frac * args.num_users), 1)
-        idxs_users = np.random.choice(range(args.num_users), m, replace=False)
+        idxs_users = rng_sample.choice(range(args.num_users), m, replace=False)
         reliability_scores = []  # R_i for this round
 
         for idx in idxs_users:
@@ -358,7 +375,7 @@ if __name__ == '__main__':
     print("|---- Avg Train Accuracy: {:.2f}%".format(100 * train_accuracy[-1]))
     print("|---- Test Accuracy: {:.2f}%".format(100 * test_acc))
 
-    # --- Save artifacts for this run (research-paper style) ---
+    # --- Save artifacts for this run ---
     # 1) Save the final global model
     save_model(out_dir, global_model)
 
@@ -380,7 +397,7 @@ if __name__ == '__main__':
 
     print('\n Total Run Time: {0:0.4f}'.format(time.time() - start_time))
 
-        # PLOTTING (optional)
+    # PLOTTING 
     import os
     import matplotlib
     matplotlib.use('Agg')
