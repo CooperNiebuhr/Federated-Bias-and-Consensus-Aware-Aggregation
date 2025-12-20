@@ -1,6 +1,6 @@
 # FedBaC: Federated Bias-and-Consensus Aware Learning (PyTorch)
 
-This repository began as a fork fro a PyTorch implementation of **Federated Averaging (FedAvg)** from *Communication-Efficient Learning of Deep Networks from Decentralized Data* (McMahan et al.), and has since been extended with my own research contributions under the **FedBaC** framework. This began as a course project but has been slightly extended. The project report detailing the mathematical formulation, metrics, ablation study, and preliminary results can be viewed here: [Project Report](reports/Project_Report.pdf)
+This repository began as a fork fro a PyTorch implementation of **Federated Averaging (FedAvg)** from *Communication-Efficient Learning of Deep Networks from Decentralized Data* (McMahan et al.), and has since been extended with my own research contributions under the **FedBaC** framework. This began as a course project but has been slightly extended. The project report detailing the mathematical formulation, metrics, ablation study, and preliminary results can be viewed here: [Project Report](report.pdf)
 
 
 FedBaC augments standard federated learning with **directional consensus**, **reliability-aware aggregation**, and an optional **client-side alignment regularizer**, targeting improved stability and performance under heterogeneous (non-IID) data.
