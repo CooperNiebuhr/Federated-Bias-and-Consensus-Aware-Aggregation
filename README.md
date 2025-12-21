@@ -3,7 +3,7 @@
 This repository began as a fork fro a PyTorch implementation of **Federated Averaging (FedAvg)** from *Communication-Efficient Learning of Deep Networks from Decentralized Data* (McMahan et al.), and has since been extended with my own research contributions under the **FedBaC** framework. This began as a course project but has been slightly extended. The project report detailing the mathematical formulation, metrics, ablation study, and preliminary results can be viewed here: [Project Report](report.pdf)
 
 
-FedBaC augments standard federated learning with **directional consensus**, **reliability-aware aggregation**, and an optional **client-side alignment regularizer**, targeting improved stability and performance under heterogeneous (non-IID) data.
+FedBaC augments standard federated learning with **directional consensus**, **reliability-aware aggregation**, and an optional **client-side alignment regularizer**, targeting improved stability and performance under heterogeneous (non-IID) data. On non-IID MNIST, FedBaC improves final accuracy by ~6% over FedAvg.
 
 The codebase supports reproducible experiments on **MNIST** and **CIFAR-10** using **Dirichlet-based non-IID partitioning**.
 
